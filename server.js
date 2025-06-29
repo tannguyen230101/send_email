@@ -197,7 +197,7 @@ const sendNotificationToAdmin = async () => {
     subject: "🔒 [Hệ thống Santafe] Yêu cầu xác thực lại Google Token",
     html: `<p>Chào bạn,</p>
     <p>Token Google của hệ thống đã hết hạn. Vui lòng xác thực lại tại liên kết dưới đây:</p>
-    <p>http://localhost:8080/auth</p>
+    <p>${process.env.SERVER}</p>
     <p>Trân trọng,<br>Hệ thống Santafe Bot</p>`,
   });
 
@@ -313,5 +313,5 @@ app.get("/run-cron", async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`🚀 Express đang chạy tại http://localhost:${PORT}`);
+  console.log(`🚀 Server đang chạy`);
 });
