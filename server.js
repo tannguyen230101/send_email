@@ -197,7 +197,7 @@ const sendNotificationToAdmin = async () => {
     subject: "🔒 [Hệ thống Santafe] Yêu cầu xác thực lại Google Token",
     html: `<p>Chào bạn,</p>
     <p>Token Google của hệ thống đã hết hạn. Vui lòng xác thực lại tại liên kết dưới đây:</p>
-    <p>${process.env.SERVER}</p>
+    <p>${process.env.SERVER}/auth</p>
     <p>Trân trọng,<br>Hệ thống Santafe Bot</p>`,
   });
 
