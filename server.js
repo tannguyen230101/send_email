@@ -2,13 +2,13 @@ const { google } = require("googleapis");
 const gmail = google.gmail("v1");
 const { Buffer } = require("buffer");
 const nodemailer = require("nodemailer");
-const cron = require("node-cron");
+// const { sendNotificationToAdmin } = require("./mailer/resendMailer");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
-const open = (...args) => import("open").then((mod) => mod.default(...args));
 const app = express();
 const PORT = 8080;
+
 require("dotenv").config();
 
 const TOKEN_PATH = path.join(__dirname, "token.json");
@@ -163,17 +163,10 @@ const forwardEmail = async (to, subject, originalBody, attachments = []) => {
     );
   } catch (err) {
     console.error("❌ Gặp lỗi khi gửi mail:", err);
-
-    const authUrl = oauth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: SCOPES,
-      prompt: "consent",
-    });
     // Có thể gửi email cho bạn hoặc log ra
     console.log(`🔁 Token hết hạn. Vui lòng đăng nhập lại tại: ${authUrl}`);
-
     // Hoặc nếu có 1 email admin, bạn có thể gửi thẳng link tới họ
-    await sendNotificationToAdmin(authUrl);
+    await sendNotificationToAdmin();
   }
 };
 
@@ -185,7 +178,7 @@ const SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
 ];
 
-const sendNotificationToAdmin = async (authUrl) => {
+const sendNotificationToAdmin = async () => {
   // 👉 Nếu lỗi do token hết hạn, gửi email hoặc log link đăng nhập mới
   console.log("Bắt đầu gửi mail...");
 
@@ -201,8 +194,11 @@ const sendNotificationToAdmin = async (authUrl) => {
     from: `"Santafe Bot" <${process.env.NOTIFY_EMAIL}>`,
     // from: `"Santafe Bot" <tanhuynhatnguyen.2003@gmail.com>`,
     to: "tanhuynhatnguyen.2003@gmail.com",
-    subject: "🔒 Token Google hết hạn",
-    html: `Token đã hết hạn. Vui lòng đăng nhập lại bằng link sau: <br><a href="${authUrl}">${authUrl}</a>`,
+    subject: "🔒 [Hệ thống Santafe] Yêu cầu xác thực lại Google Token",
+    html: `<p>Chào bạn,</p>
+    <p>Token Google của hệ thống đã hết hạn. Vui lòng xác thực lại tại liên kết dưới đây:</p>
+    <p>http://localhost:8080/auth</p>
+    <p>Trân trọng,<br>Hệ thống Santafe Bot</p>`,
   });
 
   console.log("📧 Đã gửi email thông báo token hết hạn.");
@@ -242,18 +238,8 @@ const checkAndNotifyIfNoToken = async () => {
   const refreshToken = oauth2Client.credentials.refresh_token;
 
   if (!refreshToken) {
-    // const authUrl = oauth2Client.generateAuthUrl({
-    //   access_type: "offline",
-    //   scope: SCOPES,
-    // });
-    const authUrl = oauth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: SCOPES,
-      prompt: "consent",
-    });
-
     console.warn("⚠️ Không có refresh token. Gửi email yêu cầu đăng nhập lại.");
-    await sendNotificationToAdmin(authUrl);
+    await sendNotificationToAdmin();
     throw new Error("❌ Thiếu refresh token. Dừng xử lý.");
   }
 };
@@ -289,15 +275,15 @@ const main = async () => {
   }
 };
 
-// app.get("/auth", (req, res) => {
-//   const url = oauth2Client.generateAuthUrl({
-//     access_type: "offline",
-//     scope: SCOPES,
-//     prompt: "consent",
-//   });
+app.get("/auth", (req, res) => {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: SCOPES,
+    prompt: "consent",
+  });
 
-//   res.redirect(url);
-// });
+  res.redirect(url);
+});
 
 app.get("/oauth2callback", async (req, res) => {
   const code = req.query.code;
@@ -316,36 +302,16 @@ app.get("/oauth2callback", async (req, res) => {
   }
 });
 
-// cron.schedule("*/5 * * * *", async () => {
-//   console.log("⏰ [CRON] Kiểm tra và forward email...");
-//   try {
-//     await main();
-//   } catch (err) {
-//     console.error("❌ Lỗi khi chạy CRON:", err);
-//     const authUrl = oauth2Client.generateAuthUrl({
-//       access_type: "offline",
-//       scope: SCOPES,
-//       prompt: "consent",
-//     });
-//     await sendNotificationToAdmin(authUrl);
-//   }
-// });
-
 app.get("/run-cron", async (req, res) => {
   try {
     await main();
     res.send("✅ Cron đã chạy thành công");
   } catch (error) {
-    console.error("❌ Lỗi khi chạy CRON:", err);
-    const authUrl = oauth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: SCOPES,
-      prompt: "consent",
-    });
-    await sendNotificationToAdmin(authUrl);
+    console.error("❌ Lỗi khi chạy CRON:", error);
+    await sendNotificationToAdmin();
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Express đang chạy tại http://localhost:${PORT}`);
 });
