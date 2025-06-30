@@ -44,7 +44,7 @@ const getRecentMessages = async () => {
     const res = await gmail.users.messages.list({
       userId: "me",
       q: "from:tommision123@gmail.com",
-      maxResults: 5,
+      maxResults: 500,
       auth: oauth2Client,
     });
 
