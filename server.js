@@ -53,7 +53,7 @@ const getRecentMessages = async () => {
 
     const detailedMessages = await Promise.all(
       messages.map(async (msg) => {
-        const fullMessage = gmail.users.messages.get({
+        const fullMessage = await gmail.users.messages.get({
           userId: "me",
           id: msg.id,
           auth: oauth2Client,
@@ -288,6 +288,16 @@ const main = async () => {
     const { subject, body, patientEmail, attachments } = await getEmailContent(
       msg.id
     );
+
+    // 👇 Thêm đoạn kiểm tra này
+    if (
+      subject.toLowerCase().includes("test") ||
+      subject.toLowerCase().includes("[spam]")
+    ) {
+      console.log(`⚠️ Bỏ qua email với subject không hợp lệ: ${subject}`);
+      continue;
+    }
+
     if (patientEmail) {
       await forwardEmail(patientEmail, subject, body, attachments);
       await addLabelToMessage(msg.id, labelId);
