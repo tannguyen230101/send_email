@@ -43,13 +43,35 @@ const getRecentMessages = async () => {
   try {
     const res = await gmail.users.messages.list({
       userId: "me",
-      q: 'from:tommision123@gmail.com subject:"Kết quả bệnh nhân"',
+      q: "from:tommision123@gmail.com",
       maxResults: 5,
       auth: oauth2Client,
     });
 
-    console.log("📨 Đã lấy danh sách email:", res.data.messages?.length || 0);
-    return res.data.messages || [];
+    const messages = res.data.messages || [];
+    console.log("📨 Đã lấy danh sách email:", messages.length);
+
+    const detailedMessages = await Promise.all(
+      messages.map(async (msg) => {
+        const fullMessage = gmail.users.messages.get({
+          userId: "me",
+          id: msg.id,
+          auth: oauth2Client,
+        });
+
+        const headers = fullMessage.data.payload.headers;
+        const subjectHeader = headers.find((h) => h.name === "Subject");
+        const subject = subjectHeader ? subjectHeader.value : "(No subject)";
+
+        return {
+          id: msg.id,
+          subject,
+          snippet: fullMessage.data.snippet,
+        };
+      })
+    );
+
+    return detailedMessages;
   } catch (err) {
     console.error("❌ Lỗi khi gọi gmail.users.messages.list:", err);
     return [];
