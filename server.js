@@ -1,17 +1,18 @@
-const { google } = require("googleapis");
-const gmail = google.gmail("v1");
-const { Buffer } = require("buffer");
-const nodemailer = require("nodemailer");
-// const { sendNotificationToAdmin } = require("./mailer/resendMailer");
+const express = require("express");
+const { Client } = require("@microsoft/microsoft-graph-client");
+const dotenv = require("dotenv");
+const axios = require("axios");
+dotenv.config();
 const fs = require("fs");
 const path = require("path");
-const express = require("express");
-const app = express();
-const PORT = 8080;
+const Configs = require("./config");
+const nodemailer = require("nodemailer");
 
-require("dotenv").config();
+const TOKEN_PATH = path.join(__dirname, "ms_token.json");
 
-const TOKEN_PATH = path.join(__dirname, "token.json");
+const saveToken = (token) => {
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify(token, null, 2));
+};
 
 const loadToken = () => {
   if (fs.existsSync(TOKEN_PATH)) {
@@ -20,185 +21,240 @@ const loadToken = () => {
   return null;
 };
 
-const saveToken = (token) => {
-  fs.writeFileSync(TOKEN_PATH, JSON.stringify(token, null, 2));
+const app = express();
+
+let accessToken = null;
+let refreshToken = null;
+
+// Đọc token từ file khi khởi động
+if (fs.existsSync(TOKEN_PATH)) {
+  //   const tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+  const tokenData = loadToken();
+  accessToken = tokenData.access_token;
+  refreshToken = tokenData.refresh_token;
+}
+
+const getAuthUrl = () => {
+  const params = new URLSearchParams({
+    client_id: Configs.appID,
+    response_type: "code",
+    redirect_uri: Configs.redirectURI,
+    response_mode: "query",
+    scope: ["offline_access", "Mail.ReadWrite", "Mail.Send"].join(" "),
+  });
+  return `https://login.microsoftonline.com/${Configs.tenantID}/oauth2/v2.0/authorize?${params}`;
 };
 
-const oauth2Client = new google.auth.OAuth2(
-  process.env.CLIENT_ID,
-  process.env.CLIENT_SECRET,
-  process.env.REDIRECT_URI
-);
+const getTokenFromCode = async (code) => {
+  const res = await axios.post(
+    `https://login.microsoftonline.com/${Configs.tenantID}/oauth2/v2.0/token`,
+    new URLSearchParams({
+      client_id: Configs.appID,
+      client_secret: Configs.valueSecret,
+      code,
+      redirect_uri: Configs.redirectURI,
+      grant_type: "authorization_code",
+    }),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
 
-const tokenData = loadToken();
-if (tokenData) oauth2Client.setCredentials(tokenData);
+  accessToken = res.data.access_token;
+  refreshToken = res.data.refresh_token;
+};
 
-oauth2Client.on("tokens", (tokens) => {
-  const updated = { ...(tokenData || {}), ...tokens };
-  saveToken(updated);
-});
-
-const getRecentMessages = async () => {
-  console.log("👉 Đã vào getRecentMessage");
-  try {
-    const res = await gmail.users.messages.list({
-      userId: "me",
-      q: "from:tommision123@gmail.com",
-      maxResults: 500,
-      auth: oauth2Client,
-    });
-
-    const messages = res.data.messages || [];
-    console.log("📨 Đã lấy danh sách email:", messages.length);
-
-    const detailedMessages = await Promise.all(
-      messages.map(async (msg) => {
-        const fullMessage = await gmail.users.messages.get({
-          userId: "me",
-          id: msg.id,
-          auth: oauth2Client,
-        });
-
-        const headers = fullMessage.data.payload.headers;
-        const subjectHeader = headers.find((h) => h.name === "Subject");
-        const subject = subjectHeader ? subjectHeader.value : "(No subject)";
-
-        return {
-          id: msg.id,
-          subject,
-          snippet: fullMessage.data.snippet,
-        };
-      })
-    );
-
-    return detailedMessages;
-  } catch (err) {
-    console.error("❌ Lỗi khi gọi gmail.users.messages.list:", err);
-    return [];
+const refreshAccessToken = async () => {
+  if (!refreshToken) {
+    await sendNotificationToAdmin();
+    throw new Error("❌ Chưa có refresh token.");
   }
+
+  const res = await axios.post(
+    `https://login.microsoftonline.com/${Configs.tenantID}/oauth2/v2.0/token`,
+    new URLSearchParams({
+      client_id: Configs.appID,
+      client_secret: Configs.valueSecret,
+      refresh_token: refreshToken,
+      redirect_uri: Configs.redirectURI,
+      grant_type: "refresh_token",
+    }),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+
+  accessToken = res.data.access_token;
+  refreshToken = res.data.refresh_token;
+
+  // ✅ Ghi lại token mới
+  //   fs.writeFileSync(
+  //     TOKEN_PATH,
+  //     JSON.stringify(
+  //       {
+  //         access_token: accessToken,
+  //         refresh_token: refreshToken,
+  //       },
+  //       null,
+  //       2
+  //     )
+  //   );
+  saveToken({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
+  console.log("🔄 Đã làm mới access token thành công.");
 };
 
-const extractBodyAndAttachments = async (
-  parts,
-  messageId,
-  attachments = []
-) => {
-  let bodyData = "";
-  for (const part of parts) {
-    if (part.parts) {
-      const nested = await extractBodyAndAttachments(
-        part.parts,
-        messageId,
-        attachments
-      );
-      if (!bodyData && nested.bodyData) bodyData = nested.bodyData;
-    } else {
-      if (
-        (part.mimeType === "text/plain" || part.mimeType === "text/html") &&
-        part.body?.data
-      ) {
-        if (!bodyData) bodyData = part.body.data;
-      }
-      if (part.filename && part.body?.attachmentId) {
-        const attachment = await gmail.users.messages.attachments.get({
-          userId: "me",
-          messageId,
-          id: part.body.attachmentId,
-          auth: oauth2Client,
-        });
-        attachments.push({
-          filename: part.filename,
-          content: Buffer.from(attachment.data.data, "base64"),
-          contentType: part.mimeType,
-        });
-      }
-    }
-  }
-  return { bodyData, attachments };
+const getGraphClient = async () => {
+  if (!accessToken) throw new Error("⚠️ Chưa có access token");
+  return Client.init({
+    authProvider: (done) => done(null, accessToken),
+  });
 };
 
-const getEmailContent = async (messageId) => {
-  console.log("👉 Đã vào get EmailContent");
-  const msg = await gmail.users.messages.get({
-    userId: "me",
-    id: messageId,
-    format: "full",
-    auth: oauth2Client,
+const getEmails = async () => {
+  const client = await getGraphClient();
+  const res = await client
+    .api("/me/mailFolders/Inbox/messages")
+    .select("id,subject,body,from,receivedDateTime,hasAttachments")
+    .orderby("receivedDateTime desc")
+    .top(25)
+    .get();
+
+  const emails = res.value.filter(
+    (email) =>
+      email.from?.emailAddress?.address.toLowerCase() ===
+      `${Configs.saleForceEmail}`
+  );
+
+  return emails.slice(0, 10);
+};
+
+
+const getAttachments = async (messageId) => {
+  const client = await getGraphClient();
+  const res = await client.api(`/me/messages/${messageId}/attachments`).get();
+
+  // Chỉ lấy loại file (không lấy attachment dạng item như email embedded)
+  return res.value
+    .filter((att) => att["@odata.type"] === "#microsoft.graph.fileAttachment")
+    .map((att) => ({
+      name: att.name,
+      contentBytes: att.contentBytes,
+      contentType: att.contentType,
+    }));
+};
+
+const createLabelIfNotExist = async () => {
+  const client = await getGraphClient();
+  const folders = await client.api(`/me/mailFolders`).get();
+
+  const existing = folders.value.find(
+    (f) => f.displayName === "ForwardedByBot"
+  );
+  if (existing) return existing.id;
+
+  const created = await client.api(`/me/mailFolders`).post({
+    displayName: "ForwardedByBot",
   });
 
-  const payload = msg.data.payload;
-  const headers = payload.headers || [];
-  const subject = headers.find((h) => h.name === "Subject")?.value || "";
-  const attachments = [];
-  const { bodyData } = await extractBodyAndAttachments(
-    [payload],
-    messageId,
-    attachments
-  );
-
-  if (!bodyData) {
-    console.warn(`⚠️ Không tìm thấy nội dung trong message ${messageId}`);
-    return { subject, body: "", patientEmail: null, attachments };
-  }
-
-  const decodedBody = Buffer.from(bodyData, "base64").toString("utf-8");
-  const emailMatch = decodedBody.match(
-    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/
-  );
-  const patientEmail = emailMatch ? emailMatch[0] : null;
-
-  return { subject, body: decodedBody, patientEmail, attachments };
+  return created.id;
 };
 
-const forwardEmail = async (to, subject, originalBody, attachments = []) => {
-  try {
-    const { token: accessToken } = await oauth2Client.getAccessToken();
+const moveEmailToLabel = async (messageId, folderId) => {
+  const client = await getGraphClient();
+  await client
+    .api(`/me/messages/${messageId}/move`)
+    .post({ destinationId: folderId });
+};
 
-    if (!accessToken) {
-      throw new Error("❌ Không thể lấy accessToken từ Google OAuth2");
-    }
+const extractEmail = (content) => {
+  const match = content.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/);
+  return match ? match[0] : null;
+};
 
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        type: "OAuth2",
-        user: "tanhuynhatnguyen.2003@gmail.com",
-        clientId: process.env.CLIENT_ID,
-        clientSecret: process.env.CLIENT_SECRET,
-        refreshToken: oauth2Client.credentials.refresh_token,
-        accessToken: accessToken,
+const forwardEmail = async (to, subject, bodyText, attachments = []) => {
+  const client = await getGraphClient();
+
+  await client.api(`/me/sendMail`).post({
+    message: {
+      subject: `Santafe Health Clinic - ${subject}`,
+      body: {
+        contentType: "HTML",
+        content: bodyText,
       },
-    });
-
-    await transporter.sendMail({
-      from: "Santafe Health <tanhuynhatnguyen.2003@gmail.com>",
-      to,
-      subject: "Santafe Health Clinic - Kết quả của bạn",
-      text: `Đây là email được chuyển tiếp tự động:\n\n${originalBody
-        .replace(/đây là saleForce/gi, "")
-        .trim()}`,
-      attachments,
-    });
-
-    console.log(
-      `✅ Đã gửi tới ${to} kèm đính kèm (${attachments.length} file).`
-    );
-  } catch (err) {
-    console.error("❌ Gặp lỗi khi gửi mail:", err);
-    // Có thể gửi email cho bạn hoặc log ra
-    console.log(`🔁 Token hết hạn. Vui lòng đăng nhập lại tại: ${authUrl}`);
-    // Hoặc nếu có 1 email admin, bạn có thể gửi thẳng link tới họ
-    await sendNotificationToAdmin();
-  }
+      toRecipients: [{ emailAddress: { address: to } }],
+      attachments: attachments.map((att) => ({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: att.name,
+        contentBytes: att.contentBytes,
+        contentType: att.contentType,
+      })),
+    },
+  });
 };
 
-// Scopes – bạn có thể thay đổi theo mục đích
-const SCOPES = [
-  "https://mail.google.com/",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/gmail.modify",
-];
+app.get("/auth", (req, res) => {
+  const authUrl = getAuthUrl();
+  //   console.log("🔗 Redirect URI:", REDIRECT_URI);
+  //   console.log("📎 Auth URL:", getAuthUrl());
+  res.redirect(authUrl);
+});
+
+app.get("/auth/callback", async (req, res) => {
+  const code = req.query.code;
+  try {
+    await getTokenFromCode(code);
+    fs.writeFileSync(
+      TOKEN_PATH,
+      JSON.stringify(
+        {
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        },
+        null,
+        2
+      )
+    );
+    res.send("✅ Đăng nhập thành công. Bạn có thể chạy /run-cron");
+  } catch (err) {
+    console.error("❌ Lỗi khi lấy token:", err);
+    res.send("Lỗi khi lấy token.");
+  }
+});
+
+app.get("/run-cron", (req, res) => {
+  res.send("⏳ Cron đang chạy nền...");
+
+  setTimeout(async () => {
+    try {
+      if (!accessToken) await refreshAccessToken();
+
+      const labelId = await createLabelIfNotExist();
+      const emails = await getEmails();
+
+      for (const email of emails) {
+        const content = email.body.content || "";
+        const patientEmail = extractEmail(content);
+
+        if (patientEmail) {
+          const attachments = email.hasAttachments
+            ? await getAttachments(email.id)
+            : [];
+
+          await forwardEmail(patientEmail, email.subject, content, attachments);
+          await moveEmailToLabel(email.id, labelId);
+          console.log(`✅ Đã forward và chuyển thư: ${email.subject}`);
+        } else {
+          console.log(`⚠️ Không tìm thấy email bệnh nhân: ${email.subject}`);
+        }
+      }
+
+      console.log("✅ Cron xử lý xong.");
+    } catch (err) {
+      console.error("❌ Lỗi khi chạy cron:", err.message);
+      await sendNotificationToAdmin();
+    }
+  }, 100); // chạy async sau 100ms
+});
+
 
 const sendNotificationToAdmin = async () => {
   // 👉 Nếu lỗi do token hết hạn, gửi email hoặc log link đăng nhập mới
@@ -207,143 +263,26 @@ const sendNotificationToAdmin = async () => {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: process.env.NOTIFY_EMAIL,
-      pass: process.env.NOTIFY_PASSWORD, // dùng app password nếu 2FA
+      user: Configs.notifyEmail,
+      pass: Configs.notifyPassword, // dùng app password nếu 2FA
     },
   });
 
   await transporter.sendMail({
-    from: `"Santafe Bot" <${process.env.NOTIFY_EMAIL}>`,
-    // from: `"Santafe Bot" <tanhuynhatnguyen.2003@gmail.com>`,
-    to: "tanhuynhatnguyen.2003@gmail.com",
-    subject: "🔒 [Hệ thống Santafe] Yêu cầu xác thực lại Google Token",
+    from: `"Santafe Bot" <${Configs.notifyEmail}>`,
+    to: `${Configs.outlookEmail}`,
+    subject: "🔒 [Santafe] Yêu cầu xác thực lại Outlook Token",
     html: `<p>Chào bạn,</p>
-    <p>Token Google của hệ thống đã hết hạn. Vui lòng xác thực lại tại liên kết dưới đây:</p>
-    <p>${process.env.SERVER}/auth</p>
-    <p>Trân trọng,<br>Hệ thống Santafe Bot</p>`,
+<p>Token Outlook của hệ thống đã hết hạn hoặc bị lỗi.</p>
+<p>Vui lòng xác thực lại bằng cách nhấn vào liên kết dưới đây:</p>
+<p><a href="${Configs.server}/auth">${Configs.server}/auth</a></p>
+<p>Trân trọng,<br>Hệ thống Santafe Bot</p>`,
   });
 
   console.log("📧 Đã gửi email thông báo token hết hạn.");
 };
 
-const ensureLabelExists = async (labelName) => {
-  const res = await gmail.users.labels.list({
-    userId: "me",
-    auth: oauth2Client,
-  });
-  const existingLabel = res.data.labels.find((l) => l.name === labelName);
-  if (existingLabel) return existingLabel.id;
-
-  const newLabel = await gmail.users.labels.create({
-    userId: "me",
-    requestBody: {
-      name: labelName,
-      labelListVisibility: "labelShow",
-      messageListVisibility: "show",
-    },
-    auth: oauth2Client,
-  });
-
-  return newLabel.data.id;
-};
-
-const addLabelToMessage = async (messageId, labelId) => {
-  await gmail.users.messages.modify({
-    userId: "me",
-    id: messageId,
-    requestBody: { addLabelIds: [labelId] },
-    auth: oauth2Client,
-  });
-};
-
-const checkAndNotifyIfNoToken = async () => {
-  const refreshToken = oauth2Client.credentials.refresh_token;
-
-  if (!refreshToken) {
-    console.warn("⚠️ Không có refresh token. Gửi email yêu cầu đăng nhập lại.");
-    await sendNotificationToAdmin();
-    throw new Error("❌ Thiếu refresh token. Dừng xử lý.");
-  }
-};
-
-const main = async () => {
-  console.log("👉 Đã vào main()");
-  await checkAndNotifyIfNoToken();
-
-  const labelId = await ensureLabelExists("ForwardedByBot");
-  const messages = await getRecentMessages();
-  if (messages.length === 0)
-    return console.log("📭 Không có email nào phù hợp.");
-
-  for (const msg of messages) {
-    const detail = await gmail.users.messages.get({
-      userId: "me",
-      id: msg.id,
-      format: "metadata",
-      auth: oauth2Client,
-    });
-
-    if ((detail.data.labelIds || []).includes(labelId)) continue;
-
-    const { subject, body, patientEmail, attachments } = await getEmailContent(
-      msg.id
-    );
-
-    // 👇 Thêm đoạn kiểm tra này
-    if (
-      subject.toLowerCase().includes("test") ||
-      subject.toLowerCase().includes("[spam]")
-    ) {
-      console.log(`⚠️ Bỏ qua email với subject không hợp lệ: ${subject}`);
-      continue;
-    }
-
-    if (patientEmail) {
-      await forwardEmail(patientEmail, subject, body, attachments);
-      await addLabelToMessage(msg.id, labelId);
-    } else {
-      console.log(`⚠️ Không tìm thấy email bệnh nhân trong message ${msg.id}`);
-    }
-  }
-};
-
-app.get("/auth", (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
-    access_type: "offline",
-    scope: SCOPES,
-    prompt: "consent",
-  });
-
-  res.redirect(url);
-});
-
-app.get("/oauth2callback", async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.send("❌ Không tìm thấy mã code.");
-
-  try {
-    const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens);
-    saveToken(tokens);
-
-    res.send("✅ Lấy token thành công! Bạn có thể đóng tab này.");
-    console.log("📦 Đã lưu token:", tokens);
-  } catch (err) {
-    console.error("❌ Lỗi khi lấy token:", err);
-    res.send("Lỗi khi lấy token.");
-  }
-});
-
-app.get("/run-cron", async (req, res) => {
-  try {
-    await main();
-    res.send("✅ Cron đã chạy thành công");
-  } catch (error) {
-    console.error("❌ Lỗi khi chạy CRON:", error);
-    await sendNotificationToAdmin();
-  }
-});
-
-app.listen(PORT, async () => {
-  console.log(`🚀 Server đang chạy`);
+app.listen(3000, () => {
+  // console.log("🚀 Server đang chạy tại http://localhost:3000");
+  res.send("✅ Server đang chạy. Đã deploy version mới.");
 });
